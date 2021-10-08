@@ -1,3 +1,4 @@
+from functools import partial
 from typing import Optional, Tuple
 
 import numpy as np
@@ -12,17 +13,25 @@ X using the factorization X = AW
 """
 
 
-def mu_solver(X: np.array, dict_size: int, beta: float = 2,
-              A: Optional[np.array] = None, W: Optional[np.array] = None,
-              init_method: Optional[str] = None, delta_min: float = 1e-8,
-              max_iterations: int = 100, verbose: bool = True,
-              plot_flag: bool = True) -> Tuple[np.array, np.array, dict]:
+def solver(X: np.array, dict_size: int, method: str = "mu",
+           beta: Optional[float] = None, A: Optional[np.array] = None,
+           W: Optional[np.array] = None, init_method: Optional[str] = None,
+           delta_min: float = 1e-8, max_iterations: int = 100,
+           verbose: bool = True, plot_flag: bool = True
+           ) -> Tuple[np.array, np.array, dict]:
     # preliminaries
     if init_method is None:
         init_method = "randn"
     n, m = X.shape
-    history = {"d_beta": [], "d_euc": [], "delta_A": [], "delta_W": [],
+    history = {"loss": [], "loss_euc": [], "delta_A": [], "delta_W": [],
                "delta_A_rel": [], "delta_W_rel": []}
+    if method == "mu":
+        step_func = partial(_mu_step, beta=beta)
+        loss_func = partial(beta_divergence, beta=beta)
+    elif method == "als":
+        step_func = _als_step
+    else:
+        raise NotImplementedError
 
     # initialize
     A, W = init_matrices(init_method, rows=n, cols=m, dict_size=dict_size,
@@ -32,31 +41,27 @@ def mu_solver(X: np.array, dict_size: int, beta: float = 2,
     iteration = 1
     while iteration <= max_iterations:
 
-        # save last values
+        # save previous values
         A_old = A.copy()
         W_old = W.copy()
 
-        # update A and W
-        AW = A @ W
-        A = A_old * ((((AW ** (beta - 2)) * X) @ W.T) / (
-                    (AW ** (beta - 1)) @ W.T))
-        AW = A @ W
-        W = W_old * ((A.T @ ((AW ** (beta - 2)) * X)) / (
-                    A.T @ (AW ** (beta - 1))))
+        # perform a step
+        A, W = step_func(X=X, A=A, W=W)
 
+        # validate values are non-negative
         assert np.all(A >= 0), "numeric error - not all values are non-negative"
         assert np.all(W >= 0), "numeric error - not all values are non-negative"
 
         # compute difference
         AW = A @ W
-        d_beta = beta_divergence(X, AW, beta)
-        d_euc = beta_divergence(X, AW, 2)
+        loss = loss_func(x=X, y=AW)
+        loss_euc = beta_divergence(X, AW, 2)
         delta_A = np.linalg.norm(A - A_old)
         delta_W = np.linalg.norm(W - W_old)
         delta_A_rel = delta_A / np.linalg.norm(A_old)
         delta_W_rel = delta_W / np.linalg.norm(W_old)
-        history["d_beta"].append(d_beta)
-        history["d_euc"].append(d_euc)
+        history["loss"].append(loss)
+        history["loss_euc"].append(loss_euc)
         history["delta_A"].append(delta_A)
         history["delta_W"].append(delta_W)
         history["delta_A_rel"].append(delta_A_rel)
@@ -78,8 +83,8 @@ def mu_solver(X: np.array, dict_size: int, beta: float = 2,
     if verbose:
         print(f"*** MU solver finished! ***")
         print(f"total iterations: {max_iterations}")
-        print(f"d_beta: {d_beta}")
-        print(f"d_euc: {d_euc}")
+        print(f"loss: {loss}")
+        print(f"loss_euc: {loss_euc}")
         print(f"delta_A_rel: {delta_A_rel}")
         print(f"delta_W_rel: {delta_W_rel}")
 
@@ -87,68 +92,47 @@ def mu_solver(X: np.array, dict_size: int, beta: float = 2,
     if plot_flag:
         iter_vec = np.arange(iteration)
 
-        # plot d_beta and d_euc as function of iteration
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                            subplot_titles=("d_beta", "d_euclidean"))
-        fig.add_trace(
-            go.Scatter(x=iter_vec, y=history["d_beta"]), row=1, col=1
-        )
-        fig.add_trace(
-            go.Scatter(x=iter_vec, y=history["d_euc"]), row=2, col=1
-        )
-
-        fig.update_layout(showlegend=False)
-        fig.show()
+        # plot loss as function of iteration
+        plot_loss(loss=history["loss"], loss_euc=history["loss_euc"])
 
         # plot delta as function of iteration
-        fig = make_subplots(rows=2, cols=2, shared_xaxes=True,
-                            subplot_titles=("delta_A", "delta_W",
-                                            "delta_A_rel [dB]",
-                                            "delta_W_rel [dB]"))
-        fig.add_trace(
-            go.Scatter(x=iter_vec, y=history["delta_A"]), row=1, col=1
-        )
-        fig.add_trace(
-            go.Scatter(x=iter_vec, y=history["delta_W"]), row=1, col=2
-        )
-        fig.add_trace(
-            go.Scatter(x=iter_vec, y=20*np.log10(history["delta_A_rel"])), row=2, col=1
-        )
-        fig.add_trace(
-            go.Scatter(x=iter_vec, y=20*np.log10(history["delta_W_rel"])), row=2, col=2
-        )
-
-        fig.update_layout(showlegend=False)
-        fig.show()
-
+        plot_matrix_delta(delta_A=history["delta_A"],delta_W=history["delta_W"],
+                          delta_A_rel=history["delta_A_rel"],
+                          delta_W_rel=history["delta_W_rel"])
 
         # plot output matrices
-        fig = make_subplots(rows=1, cols=2,
-                            subplot_titles=("A (dictionary)", "W (weights)"))
-        fig.add_trace(
-            go.Heatmap(z=A, coloraxis='coloraxis'), row=1, col=1
-        )
-        fig.add_trace(
-            go.Heatmap(z=W, coloraxis='coloraxis2'), row=1, col=2
-        )
-        fig.update_layout(coloraxis=dict(colorbar_x=0.46),
-                          coloraxis2=dict(colorbar_x=1.0075))
-        fig.show()
+        plot_factor_matrices(A=A, W=W)
 
         # plot reconstructed matrix
-        fig = make_subplots(rows=1, cols=2,
-                            subplot_titles=("X (org)", "X (reconstructed)"))
-        fig.add_trace(
-            go.Heatmap(z=X, coloraxis="coloraxis"), row=1, col=1
-        )
-        fig.add_trace(
-            go.Heatmap(z=AW, coloraxis="coloraxis"), row=1, col=2
-        )
-        fig.show()
+        plot_reconstructed_matrix(X_org=X, X_rec=AW)
 
         pass
 
     return A, W, history
+
+
+def _mu_step(X: np.array, A: np.array, W: np.array, **kwargs
+             ) -> Tuple[np.array, np.array]:
+    # preliminaries
+    beta = kwargs["beta"]
+
+    # save last values
+    A_old = A.copy()
+    W_old = W.copy()
+
+    # update A and W
+    AW = A @ W
+    A = A_old * ((((AW ** (beta - 2)) * X) @ W.T) / (
+            (AW ** (beta - 1)) @ W.T))
+    AW = A @ W
+    W = W_old * ((A.T @ ((AW ** (beta - 2)) * X)) / (
+            A.T @ (AW ** (beta - 1))))
+
+    return A, W
+
+
+def _als_step():
+    raise NotImplementedError
 
 
 def init_matrices(init_method: str, rows: int, cols: int, dict_size: int,
@@ -199,14 +183,90 @@ def beta_divergence(x: np.ndarray, y: np.ndarray, beta: float) -> np.ndarray:
         d = 0.5 * np.linalg.norm(x - y) ** 2
     else:  # general case
         d = np.sum((x ** b + (b - 1) * (y ** b) - b * x * (y ** (b - 1))) / (
-                    b * (b - 1)))
+                b * (b - 1)))
 
     return d
 
+
+def plot_reconstructed_matrix(X_org: np.array, X_rec: np.array) -> go.Figure:
+    fig = make_subplots(rows=1, cols=2,
+                        subplot_titles=("X (org)", "X (reconstructed)"))
+    fig.add_trace(
+        go.Heatmap(z=X_org, coloraxis="coloraxis"), row=1, col=1
+    )
+    fig.add_trace(
+        go.Heatmap(z=X_rec, coloraxis="coloraxis"), row=1, col=2
+    )
+    fig.show()
+
+    return fig
+
+
+def plot_factor_matrices(A: np.array, W: np.array) -> go.Figure:
+    fig = make_subplots(rows=1, cols=2,
+                        subplot_titles=("A (dictionary)", "W (weights)"))
+    fig.add_trace(
+        go.Heatmap(z=A, coloraxis='coloraxis'), row=1, col=1
+    )
+    fig.add_trace(
+        go.Heatmap(z=W, coloraxis='coloraxis2'), row=1, col=2
+    )
+    fig.update_layout(coloraxis=dict(colorbar_x=0.46),
+                      coloraxis2=dict(colorbar_x=1.0075))
+    fig.show()
+
+    return fig
+
+
+def plot_matrix_delta(delta_A: np.array, delta_A_rel: np.array,
+                      delta_W: np.array, delta_W_rel: np.array) -> go.Figure:
+    iter_vec = np.arange(np.size(delta_A))
+
+    fig = make_subplots(rows=2, cols=2, shared_xaxes=True,
+                        subplot_titles=("delta_A", "delta_W",
+                                        "delta_A_rel [dB]",
+                                        "delta_W_rel [dB]"))
+    fig.add_trace(
+        go.Scatter(x=iter_vec, y=delta_A), row=1, col=1
+    )
+    fig.add_trace(
+        go.Scatter(x=iter_vec, y=delta_W), row=1, col=2
+    )
+    fig.add_trace(
+        go.Scatter(x=iter_vec, y=20 * np.log10(delta_A_rel)),
+        row=2, col=1
+    )
+    fig.add_trace(
+        go.Scatter(x=iter_vec, y=20 * np.log10(delta_W_rel)),
+        row=2, col=2
+    )
+
+    fig.update_layout(showlegend=False)
+    fig.show()
+
+    return fig
+
+
+def plot_loss(loss: np.arange, loss_euc: np.arange) -> go.Figure:
+    iter_vec = np.arange(np.size(loss))
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                        subplot_titles=("loss", "loss (euclidean)"))
+    fig.add_trace(
+        go.Scatter(x=iter_vec, y=loss), row=1, col=1
+    )
+    fig.add_trace(
+        go.Scatter(x=iter_vec, y=loss_euc), row=2, col=1
+    )
+
+    fig.update_layout(showlegend=False)
+    fig.show()
+
+    return fig
 
 # X = np.random.randn(200,400)
 A_org = np.abs(np.random.randn(200, 100))
 W_org = np.abs(np.random.randn(100, 400))
 X = A_org @ W_org
-A,W,history = mu_solver(X, dict_size=20, beta=1, init_method="randn", max_iterations=2000)
+A, W, history = solver(X, dict_size=20, beta=1, init_method="randn",
+                       max_iterations=2000)
 pass
