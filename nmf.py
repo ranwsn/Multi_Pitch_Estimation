@@ -14,10 +14,11 @@ X using the factorization X = AW
 
 
 def solver(X: np.array, dict_size: int, method: str = "mu",
-           beta: Optional[float] = None, A: Optional[np.array] = None,
-           W: Optional[np.array] = None, init_method: Optional[str] = None,
-           delta_min: float = 1e-8, max_iterations: int = 100,
-           verbose: bool = True, plot_flag: bool = True
+           A: Optional[np.array] = None, W: Optional[np.array] = None,
+           init_method: Optional[str] = None, delta_min: float = 1e-8,
+           max_iterations: int = 100, verbose: bool = True,
+           plot_flag: bool = True, beta: Optional[float] = None,
+           scaling_flag: Optional[bool] = True
            ) -> Tuple[np.array, np.array, dict]:
     # preliminaries
     if init_method is None:
@@ -29,7 +30,8 @@ def solver(X: np.array, dict_size: int, method: str = "mu",
         step_func = partial(_mu_step, beta=beta)
         loss_func = partial(beta_divergence, beta=beta)
     elif method == "als":
-        step_func = _als_step
+        step_func = partial(_als_step, scaling_flag=scaling_flag)
+        loss_func = partial(beta_divergence, beta=2)
     else:
         raise NotImplementedError
 
@@ -60,6 +62,8 @@ def solver(X: np.array, dict_size: int, method: str = "mu",
         delta_W = np.linalg.norm(W - W_old)
         delta_A_rel = delta_A / np.linalg.norm(A_old)
         delta_W_rel = delta_W / np.linalg.norm(W_old)
+
+        # save results of current iteration
         history["loss"].append(loss)
         history["loss_euc"].append(loss_euc)
         history["delta_A"].append(delta_A)
@@ -106,9 +110,28 @@ def solver(X: np.array, dict_size: int, method: str = "mu",
         # plot reconstructed matrix
         plot_reconstructed_matrix(X_org=X, X_rec=AW)
 
-        pass
-
     return A, W, history
+
+
+def _als_step(X: np.array, A: np.array, W: np.array, **kwargs
+              ) -> Tuple[np.array, np.array]:
+
+    # preliminaries
+    scaling_flag = kwargs["scaling_flag"]
+
+    # update A and W
+    A, *_ = linalg.lstsq(W.T, X.T)
+    A = np.maximum(A.T, 0)
+    W, *_ = linalg.lstsq(A, X)
+    W = np.maximum(W, 0)
+
+    # calculate scaling factor correction
+    if scaling_flag:
+        AW = A @ W
+        c = np.trace(X @ AW.T) / (np.linalg.norm(AW)**2)
+        A = c * A
+
+    return A, W
 
 
 def _mu_step(X: np.array, A: np.array, W: np.array, **kwargs
@@ -129,10 +152,6 @@ def _mu_step(X: np.array, A: np.array, W: np.array, **kwargs
             A.T @ (AW ** (beta - 1))))
 
     return A, W
-
-
-def _als_step():
-    raise NotImplementedError
 
 
 def init_matrices(init_method: str, rows: int, cols: int, dict_size: int,
@@ -157,6 +176,10 @@ def init_matrices(init_method: str, rows: int, cols: int, dict_size: int,
         Vh = Vh[:dict_size, :]
         A = U * s
         W = s[:, None] * Vh
+    elif init_method == "als":
+        A, W, *_ = solver(X=X, dict_size=dict_size, method="als",
+                          init_method="randn", verbose=False,plot_flag=False,
+                          max_iterations=100)
     else:
         raise NotImplementedError
 
@@ -267,6 +290,6 @@ def plot_loss(loss: np.arange, loss_euc: np.arange) -> go.Figure:
 A_org = np.abs(np.random.randn(200, 100))
 W_org = np.abs(np.random.randn(100, 400))
 X = A_org @ W_org
-A, W, history = solver(X, dict_size=20, beta=1, init_method="randn",
-                       max_iterations=2000)
+A, W, history = solver(X, dict_size=20, method="mu", beta=2, init_method="als",
+                       max_iterations=2000, scaling_flag=True)
 pass
